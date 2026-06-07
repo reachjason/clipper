@@ -65,6 +65,10 @@ def _add_clip_parser(subparsers: argparse._SubParsersAction) -> None:
         "--overwrite", action="store_true",
         help="overwrite the output file if it exists",
     )
+    p.add_argument(
+        "--force-download", action="store_true",
+        help="re-download from a URL even if the footage is already cached",
+    )
     p.add_argument("-q", "--quiet", action="store_true", help="less output")
     p.set_defaults(func=_cmd_clip)
 
@@ -72,6 +76,19 @@ def _add_clip_parser(subparsers: argparse._SubParsersAction) -> None:
 def _clip_output(source_name: str) -> Path:
     stem = Path(source_name).stem or "video"
     return OUTPUT_DIR / f"{stem}_clip.mp4"
+
+
+def _get_footage(link: str, *, force: bool, quiet: bool) -> Path:
+    """Return raw footage for a URL, reusing the cached copy unless `force`."""
+    if not force:
+        cached = index.find_raw_for_link(INDEX_PATH, link)
+        if cached is not None:
+            if not quiet:
+                print(f"Reusing cached footage: {cached}", file=sys.stderr)
+            return cached
+    if not quiet:
+        print(f"Downloading {link} ...", file=sys.stderr)
+    return download(link, RAW_DIR, quiet=quiet)
 
 
 def _cmd_clip(args: argparse.Namespace) -> int:
@@ -102,10 +119,8 @@ def _cmd_clip(args: argparse.Namespace) -> int:
                     file=sys.stderr,
                 )
                 return 1
-            if not args.quiet:
-                print(f"Downloading {args.input} ...", file=sys.stderr)
-            source = download(args.input, RAW_DIR, quiet=args.quiet)
-            if output is not None:
+            source = _get_footage(link, force=args.force_download, quiet=args.quiet)
+            if output is not None and output != source:
                 output.parent.mkdir(parents=True, exist_ok=True)
                 shutil.move(str(source), str(output))
                 source = output
@@ -115,9 +130,7 @@ def _cmd_clip(args: argparse.Namespace) -> int:
 
         # Clip mode. Resolve the source: download (and keep) if it's a URL.
         if is_url_input:
-            if not args.quiet:
-                print(f"Downloading {args.input} ...", file=sys.stderr)
-            source = download(args.input, RAW_DIR, quiet=args.quiet)
+            source = _get_footage(link, force=args.force_download, quiet=args.quiet)
             output_basis = source.name
         else:
             source = Path(args.input).expanduser()

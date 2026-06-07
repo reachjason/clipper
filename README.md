@@ -28,6 +28,9 @@ logged to **`outputs/index.csv`** (columns: `timestamp`, `link`, `input_path`,
 `output_path`) so any clip can be traced back to its source. See
 [`outputs/README.md`](outputs/README.md) for details.
 
+If you've already downloaded a URL before, clipper **reuses the cached footage**
+instead of re-downloading it. Pass `--force-download` to fetch a fresh copy.
+
 ### What gets produced
 
 | You provide | Result |
@@ -68,6 +71,7 @@ Anything yt-dlp supports as a source works here (YouTube, X/Twitter, Vimeo, and
 | `-o, --output` | Output path (default `<name>_clip.mp4` in cwd) |
 | `--copy` | Stream-copy instead of re-encoding: instant, but the start snaps to the nearest keyframe |
 | `--overwrite` | Replace an existing output file |
+| `--force-download` | Re-download a URL even if its footage is already cached |
 | `-q, --quiet` | Less output |
 
 By default clips are **re-encoded** (libx264/aac) so the cut is frame-accurate.

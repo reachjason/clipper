@@ -35,3 +35,18 @@ def append_row(
                 "output_path": output_path,
             }
         )
+
+
+def find_raw_for_link(index_path: Path, link: str) -> Path | None:
+    """Return the most recent raw file we downloaded for `link`, if it still
+    exists on disk. Used to avoid re-downloading footage we already have."""
+    if not link or not index_path.exists():
+        return None
+    match: Path | None = None
+    with index_path.open(newline="") as f:
+        for row in csv.DictReader(f):
+            if row.get("link") == link:
+                candidate = Path(row.get("input_path", ""))
+                if candidate.exists():
+                    match = candidate  # keep scanning; last match wins
+    return match

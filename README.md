@@ -13,27 +13,47 @@ additional subcommands.
 ## Usage
 
 ```sh
-./clip clip <input> --duration <length> [--start <time>] [--output <file>]
+./clip clip <input> [--duration <length>] [--start <time>] [--output <file>]
 ```
 
 `<input>` is either a local path or an `http(s)` URL — it's auto-detected.
 
 Times accept seconds (`90`), `M:SS` (`1:30`), or `H:MM:SS` (`00:01:30`).
 
+By default, results are saved into the **`outputs/`** folder (created
+automatically, and git-ignored). Pass `--output` to choose your own path.
+
+Downloaded source footage is kept under **`outputs/raw/`**, and every run is
+logged to **`outputs/index.csv`** (columns: `timestamp`, `link`, `input_path`,
+`output_path`) so any clip can be traced back to its source. See
+[`outputs/README.md`](outputs/README.md) for details.
+
+### What gets produced
+
+| You provide | Result |
+|-------------|--------|
+| `--duration` (and optionally `--start`) | A clip of that length |
+| `--start` only | A clip from that point **to the end** |
+| **Neither** (URL input) | The **full video, downloaded** (no re-encode) |
+| Neither (local file) | Nothing to do — friendly error |
+
 ### Examples
 
 ```sh
+# Just download a full video (no clipping)
+./clip clip "https://x.com/user/status/123..."
+
 # First 30 seconds of a local file
 ./clip clip talk.mp4 -d 30
 
-# 15-second clip starting at 1:30
-./clip clip talk.mp4 -s 1:30 -d 15 -o highlight.mp4
+# 15-second clip starting at 1:30, to a chosen path
+./clip clip talk.mp4 -s 1:30 -d 15 -o ~/Desktop/highlight.mp4
+
+# From 0:10 to the end
+./clip clip talk.mp4 -s 0:10
 
 # From YouTube
 ./clip clip "https://www.youtube.com/watch?v=..." -s 0:10 -d 20
-
-# From X / Twitter
-./clip clip "https://x.com/user/status/123..." -d 10
 ```
 
 Anything yt-dlp supports as a source works here (YouTube, X/Twitter, Vimeo, and
@@ -63,6 +83,8 @@ clipper/
   video.py           # ffmpeg/ffprobe: probe + clip
   download.py        # yt-dlp URL handling
   timeparse.py       # time parsing/formatting
+  index.py           # outputs/index.csv logging
+outputs/             # generated media + index.csv (git-ignored)
 ```
 
 To add a feature later (e.g. `transcribe`), add a module plus an

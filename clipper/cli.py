@@ -7,34 +7,54 @@ each subcommand registers itself with its own args and a handler.
 from __future__ import annotations
 
 import argparse
+import shutil
 import sys
-import tempfile
+from datetime import datetime, timezone
 from pathlib import Path
 
-from . import __version__
+from . import __version__, index
 from .download import download, is_url
 from .timeparse import parse_time
 from .video import FFmpegError, ToolNotFound, clip, probe_duration
+
+# Generated files land here by default; this folder is git-ignored.
+OUTPUT_DIR = Path(__file__).resolve().parents[1] / "outputs"
+RAW_DIR = OUTPUT_DIR / "raw"          # downloaded source footage, kept
+INDEX_PATH = OUTPUT_DIR / "index.csv"  # link -> input -> output log
+
+
+def _log_index(link: str, input_path: Path, output_path: Path) -> None:
+    index.append_row(
+        INDEX_PATH,
+        timestamp=datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        link=link,
+        input_path=str(input_path),
+        output_path=str(output_path),
+    )
 
 
 def _add_clip_parser(subparsers: argparse._SubParsersAction) -> None:
     p = subparsers.add_parser(
         "clip",
-        help="cut a clip from a local file or URL",
-        description="Cut a clip of a given start + duration from a video.",
+        help="clip or download a video from a local file or URL",
+        description=(
+            "Cut a clip from a video. With no --start/--duration, a URL is "
+            "simply downloaded in full."
+        ),
     )
     p.add_argument("input", help="local video path or a URL (http/https)")
     p.add_argument(
-        "-s", "--start", default="0",
+        "-s", "--start", default=None,
         help="start time: seconds, M:SS, or H:MM:SS (default: 0)",
     )
     p.add_argument(
-        "-d", "--duration", required=True,
-        help="clip length: seconds, M:SS, or H:MM:SS",
+        "-d", "--duration", default=None,
+        help="clip length: seconds, M:SS, or H:MM:SS. Omit with --start to clip "
+             "to the end; omit both to just download a URL.",
     )
     p.add_argument(
         "-o", "--output", default=None,
-        help="output file (default: <name>_clip.mp4 in the cwd)",
+        help="output file (default: a name in the outputs/ folder)",
     )
     p.add_argument(
         "--copy", action="store_true",
@@ -49,32 +69,56 @@ def _add_clip_parser(subparsers: argparse._SubParsersAction) -> None:
     p.set_defaults(func=_cmd_clip)
 
 
-def _default_output(source_name: str) -> Path:
+def _clip_output(source_name: str) -> Path:
     stem = Path(source_name).stem or "video"
-    return Path.cwd() / f"{stem}_clip.mp4"
+    return OUTPUT_DIR / f"{stem}_clip.mp4"
 
 
 def _cmd_clip(args: argparse.Namespace) -> int:
     try:
-        start = parse_time(args.start)
-        duration = parse_time(args.duration)
+        start = parse_time(args.start) if args.start is not None else 0.0
+        duration = parse_time(args.duration) if args.duration is not None else None
     except ValueError as e:
         print(f"error: {e}", file=sys.stderr)
         return 2
 
-    if duration <= 0:
+    if duration is not None and duration <= 0:
         print("error: --duration must be greater than 0", file=sys.stderr)
         return 2
 
-    tmpdir: tempfile.TemporaryDirectory | None = None
+    # No start and no duration => download-only mode (URLs only).
+    download_only = args.start is None and args.duration is None
+    is_url_input = is_url(args.input)
+    link = args.input if is_url_input else ""
+    output = Path(args.output).expanduser() if args.output else None
+
     try:
-        # Resolve the source: download if it's a URL.
-        if is_url(args.input):
-            tmpdir = tempfile.TemporaryDirectory(prefix="clipper-")
+        # Download-only: the raw footage IS the deliverable; keep it in raw/.
+        if download_only:
+            if not is_url_input:
+                print(
+                    "error: nothing to do — the input is already a local file. "
+                    "Add --duration (and optionally --start) to make a clip.",
+                    file=sys.stderr,
+                )
+                return 1
             if not args.quiet:
                 print(f"Downloading {args.input} ...", file=sys.stderr)
-            source = download(args.input, Path(tmpdir.name), quiet=args.quiet)
-            output_basis = args.input.rstrip("/").split("/")[-1] or source.name
+            source = download(args.input, RAW_DIR, quiet=args.quiet)
+            if output is not None:
+                output.parent.mkdir(parents=True, exist_ok=True)
+                shutil.move(str(source), str(output))
+                source = output
+            _log_index(link, source, source)
+            print(source)
+            return 0
+
+        # Clip mode. Resolve the source: download (and keep) if it's a URL.
+        if is_url_input:
+            if not args.quiet:
+                print(f"Downloading {args.input} ...", file=sys.stderr)
+            source = download(args.input, RAW_DIR, quiet=args.quiet)
+            output_basis = source.name
         else:
             source = Path(args.input).expanduser()
             if not source.exists():
@@ -82,7 +126,8 @@ def _cmd_clip(args: argparse.Namespace) -> int:
                 return 1
             output_basis = source.name
 
-        output = Path(args.output).expanduser() if args.output else _default_output(output_basis)
+        if output is None:
+            output = _clip_output(output_basis)
 
         # Validate against the source duration when we can read it.
         total = probe_duration(source)
@@ -94,7 +139,7 @@ def _cmd_clip(args: argparse.Namespace) -> int:
                     file=sys.stderr,
                 )
                 return 1
-            if start + duration > total + 0.5:
+            if duration is not None and start + duration > total + 0.5:
                 avail = total - start
                 print(
                     f"warning: requested {duration:g}s but only {avail:g}s remain "
@@ -103,14 +148,13 @@ def _cmd_clip(args: argparse.Namespace) -> int:
                 )
 
         if not args.quiet:
-            print(
-                f"Clipping {duration:g}s from {start:g}s -> {output}",
-                file=sys.stderr,
-            )
+            span = f"{duration:g}s" if duration is not None else "to end"
+            print(f"Clipping {span} from {start:g}s -> {output}", file=sys.stderr)
         clip(
             source, output, start, duration,
             copy=args.copy, overwrite=args.overwrite, quiet=args.quiet,
         )
+        _log_index(link, source, output)
         print(output)
         return 0
 
@@ -123,9 +167,6 @@ def _cmd_clip(args: argparse.Namespace) -> int:
     except (FFmpegError, RuntimeError, ValueError) as e:
         print(f"error: {e}", file=sys.stderr)
         return 1
-    finally:
-        if tmpdir is not None:
-            tmpdir.cleanup()
 
 
 def build_parser() -> argparse.ArgumentParser:

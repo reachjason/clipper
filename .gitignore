@@ -5,7 +5,8 @@ __pycache__/
 .venv/
 venv/
 
-# Generated clips / video outputs
+# Generated clips / downloads
+outputs/
 *_clip.mp4
 *.mp4
 *.mkv

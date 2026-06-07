@@ -18,11 +18,12 @@ def download(url: str, dest_dir: Path, *, quiet: bool = False) -> Path:
     """Download `url` into `dest_dir`, returning the saved file path."""
     yt_dlp = require("yt-dlp")  # raises ToolNotFound with a helpful message
 
-    out_template = str(dest_dir / "%(id)s.%(ext)s")
+    out_template = str(dest_dir / "%(title).100s [%(id)s].%(ext)s")
     cmd = [
         yt_dlp,
         "-f", "bv*+ba/b",          # best video+audio, fall back to best single
         "--merge-output-format", "mp4",
+        "--restrict-filenames",    # safe, shell-friendly filenames
         "-o", out_template,
         "--print", "after_move:filepath",
         "--no-simulate",

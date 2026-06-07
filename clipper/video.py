@@ -55,20 +55,21 @@ def clip(
     source: Path,
     output: Path,
     start: float,
-    duration: float,
+    duration: float | None = None,
     *,
     copy: bool = False,
     overwrite: bool = False,
     quiet: bool = False,
 ) -> Path:
-    """Cut `duration` seconds starting at `start` from `source` into `output`.
+    """Cut from `start` into `output`.
 
-    By default re-encodes for frame-accurate cuts. `copy=True` uses stream-copy
-    (instant, but snaps the start to the nearest keyframe).
+    If `duration` is given, cut that many seconds; if `None`, cut to the end of
+    the source. By default re-encodes for frame-accurate cuts. `copy=True` uses
+    stream-copy (instant, but snaps the start to the nearest keyframe).
     """
     ffmpeg = require("ffmpeg")
 
-    if duration <= 0:
+    if duration is not None and duration <= 0:
         raise ValueError("duration must be positive")
 
     if output.exists() and not overwrite:
@@ -80,7 +81,9 @@ def clip(
 
     cmd = [ffmpeg, "-hide_banner", "-y"]
     # -ss before -i is fast and, combined with re-encoding, still frame-accurate.
-    cmd += ["-ss", format_time(start), "-i", str(source), "-t", format_time(duration)]
+    cmd += ["-ss", format_time(start), "-i", str(source)]
+    if duration is not None:
+        cmd += ["-t", format_time(duration)]
 
     if copy:
         cmd += ["-c", "copy"]

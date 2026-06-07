@@ -1,0 +1,19 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# Generated clips / video outputs
+*_clip.mp4
+*.mp4
+*.mkv
+*.webm
+*.mov
+*.m4a
+*.part
+
+# OS / editor
+.DS_Store
+*.swp

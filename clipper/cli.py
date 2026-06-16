@@ -13,7 +13,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from . import __version__, index
-from .download import download, is_url
+from .download import download, is_url, probe_filename
 from .timeparse import parse_time
 from .video import FFmpegError, ToolNotFound, clip, probe_duration
 
@@ -28,6 +28,7 @@ def _log_index(link: str, input_path: Path, output_path: Path) -> None:
         INDEX_PATH,
         timestamp=datetime.now(timezone.utc).isoformat(timespec="seconds"),
         link=link,
+        video_id=index.id_from_name(input_path.name),
         input_path=str(input_path),
         output_path=str(output_path),
     )
@@ -47,10 +48,16 @@ def _add_clip_parser(subparsers: argparse._SubParsersAction) -> None:
         "-s", "--start", default=None,
         help="start time: seconds, M:SS, or H:MM:SS (default: 0)",
     )
-    p.add_argument(
+    span = p.add_mutually_exclusive_group()
+    span.add_argument(
         "-d", "--duration", default=None,
         help="clip length: seconds, M:SS, or H:MM:SS. Omit with --start to clip "
-             "to the end; omit both to just download a URL.",
+             "to the end; omit everything to just download a URL.",
+    )
+    span.add_argument(
+        "-e", "--end", default=None,
+        help="end time: seconds, M:SS, or H:MM:SS. Clip runs from --start to "
+             "here (mutually exclusive with --duration).",
     )
     p.add_argument(
         "-o", "--output", default=None,
@@ -79,9 +86,17 @@ def _clip_output(source_name: str) -> Path:
 
 
 def _get_footage(link: str, *, force: bool, quiet: bool) -> Path:
-    """Return raw footage for a URL, reusing the cached copy unless `force`."""
+    """Return raw footage for a URL, reusing a cached copy unless `force`.
+
+    Dedup is by video ID: an exact-URL hit is the fast path (no network); a
+    different URL for the same video is caught via a metadata-only id probe.
+    """
     if not force:
         cached = index.find_raw_for_link(INDEX_PATH, link)
+        if cached is None:
+            predicted = probe_filename(link, RAW_DIR, quiet=quiet)
+            video_id = index.id_from_name(predicted)
+            cached = index.find_raw_by_id(INDEX_PATH, RAW_DIR, video_id)
         if cached is not None:
             if not quiet:
                 print(f"Reusing cached footage: {cached}", file=sys.stderr)
@@ -95,6 +110,7 @@ def _cmd_clip(args: argparse.Namespace) -> int:
     try:
         start = parse_time(args.start) if args.start is not None else 0.0
         duration = parse_time(args.duration) if args.duration is not None else None
+        end = parse_time(args.end) if args.end is not None else None
     except ValueError as e:
         print(f"error: {e}", file=sys.stderr)
         return 2
@@ -103,8 +119,18 @@ def _cmd_clip(args: argparse.Namespace) -> int:
         print("error: --duration must be greater than 0", file=sys.stderr)
         return 2
 
-    # No start and no duration => download-only mode (URLs only).
-    download_only = args.start is None and args.duration is None
+    # An end time is just a friendlier way to express a duration.
+    if end is not None:
+        if end <= start:
+            print(
+                f"error: --end ({end:g}s) must be after --start ({start:g}s)",
+                file=sys.stderr,
+            )
+            return 2
+        duration = end - start
+
+    # No start, duration, or end => download-only mode (URLs only).
+    download_only = args.start is None and args.duration is None and args.end is None
     is_url_input = is_url(args.input)
     link = args.input if is_url_input else ""
     output = Path(args.output).expanduser() if args.output else None

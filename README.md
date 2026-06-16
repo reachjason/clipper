@@ -13,7 +13,7 @@ additional subcommands.
 ## Usage
 
 ```sh
-./clip clip <input> [--duration <length>] [--start <time>] [--output <file>]
+./clip clip <input> [--start <time>] [--duration <length> | --end <time>] [--output <file>]
 ```
 
 `<input>` is either a local path or an `http(s)` URL — it's auto-detected.
@@ -24,21 +24,27 @@ By default, results are saved into the **`outputs/`** folder (created
 automatically, and git-ignored). Pass `--output` to choose your own path.
 
 Downloaded source footage is kept under **`outputs/raw/`**, and every run is
-logged to **`outputs/index.csv`** (columns: `timestamp`, `link`, `input_path`,
-`output_path`) so any clip can be traced back to its source. See
+logged to **`outputs/index.csv`** (columns: `timestamp`, `link`, `video_id`,
+`input_path`, `output_path`) so any clip can be traced back to its source. See
 [`outputs/README.md`](outputs/README.md) for details.
 
-If you've already downloaded a URL before, clipper **reuses the cached footage**
-instead of re-downloading it. Pass `--force-download` to fetch a fresh copy.
+If you've already downloaded a video before, clipper **reuses the cached
+footage** instead of re-downloading it. Dedup is **by video ID**, so a different
+URL for the same video (e.g. `youtu.be/abc` vs `youtube.com/watch?v=abc`) still
+reuses the existing copy. Pass `--force-download` to fetch a fresh copy.
 
 ### What gets produced
 
 | You provide | Result |
 |-------------|--------|
 | `--duration` (and optionally `--start`) | A clip of that length |
+| `--end` (and optionally `--start`) | A clip from `--start` **to that point** |
 | `--start` only | A clip from that point **to the end** |
-| **Neither** (URL input) | The **full video, downloaded** (no re-encode) |
-| Neither (local file) | Nothing to do — friendly error |
+| **Nothing** (URL input) | The **full video, downloaded** (no re-encode) |
+| Nothing (local file) | Nothing to do — friendly error |
+
+`--duration` and `--end` are two ways to say the same thing — use whichever is
+handier. They can't be combined.
 
 ### Examples
 
@@ -51,6 +57,9 @@ instead of re-downloading it. Pass `--force-download` to fetch a fresh copy.
 
 # 15-second clip starting at 1:30, to a chosen path
 ./clip clip talk.mp4 -s 1:30 -d 15 -o ~/Desktop/highlight.mp4
+
+# From 1:30 to 1:45 (by end time, no duration math)
+./clip clip talk.mp4 -s 1:30 -e 1:45
 
 # From 0:10 to the end
 ./clip clip talk.mp4 -s 0:10
@@ -67,7 +76,8 @@ Anything yt-dlp supports as a source works here (YouTube, X/Twitter, Vimeo, and
 | Flag | Meaning |
 |------|---------|
 | `-s, --start` | Start time (default `0`) |
-| `-d, --duration` | Clip length (required) |
+| `-d, --duration` | Clip length (mutually exclusive with `--end`) |
+| `-e, --end` | End time — clip runs from `--start` to here (mutually exclusive with `--duration`) |
 | `-o, --output` | Output path (default `<name>_clip.mp4` in cwd) |
 | `--copy` | Stream-copy instead of re-encoding: instant, but the start snaps to the nearest keyframe |
 | `--overwrite` | Replace an existing output file |

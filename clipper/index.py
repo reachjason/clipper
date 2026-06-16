@@ -7,9 +7,21 @@ source link and the raw footage it came from.
 from __future__ import annotations
 
 import csv
+import re
 from pathlib import Path
 
-FIELDS = ["timestamp", "link", "input_path", "output_path"]
+FIELDS = ["timestamp", "link", "video_id", "input_path", "output_path"]
+
+# Raw files are named "<title> [<id>].<ext>"; pull the bracketed id back out.
+_ID_RE = re.compile(r"\[([^\[\]]+)\]\.[^.]+$")
+
+
+def id_from_name(name: str | None) -> str:
+    """Extract the `[id]` token from a raw filename, or '' if absent."""
+    if not name:
+        return ""
+    m = _ID_RE.search(Path(name).name)
+    return m.group(1) if m else ""
 
 
 def append_row(
@@ -17,6 +29,7 @@ def append_row(
     *,
     timestamp: str,
     link: str,
+    video_id: str,
     input_path: str,
     output_path: str,
 ) -> None:
@@ -31,6 +44,7 @@ def append_row(
             {
                 "timestamp": timestamp,
                 "link": link,
+                "video_id": video_id,
                 "input_path": input_path,
                 "output_path": output_path,
             }
@@ -49,4 +63,31 @@ def find_raw_for_link(index_path: Path, link: str) -> Path | None:
                 candidate = Path(row.get("input_path", ""))
                 if candidate.exists():
                     match = candidate  # keep scanning; last match wins
+    return match
+
+
+def find_raw_by_id(index_path: Path, raw_dir: Path, video_id: str) -> Path | None:
+    """Return cached footage for `video_id` regardless of which URL fetched it.
+
+    Checks the index's video_id column first, then falls back to scanning
+    raw_dir for a file whose name carries the same `[id]` token.
+    """
+    if not video_id:
+        return None
+    match: Path | None = None
+    if index_path.exists():
+        with index_path.open(newline="") as f:
+            for row in csv.DictReader(f):
+                vid = row.get("video_id") or id_from_name(row.get("input_path"))
+                if vid == video_id:
+                    candidate = Path(row.get("input_path", ""))
+                    if candidate.exists():
+                        match = candidate
+    if match is not None:
+        return match
+    token = f"[{video_id}]"
+    if raw_dir.exists():
+        for p in sorted(raw_dir.iterdir()):
+            if p.is_file() and token in p.name:
+                match = p
     return match

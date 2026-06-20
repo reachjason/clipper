@@ -10,8 +10,13 @@ import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
-_VENV_PY = ROOT / ".venv" / "bin" / "python"
-if _VENV_PY.exists() and Path(sys.executable).resolve() != _VENV_PY.resolve():
+_VENV = ROOT / ".venv"
+_VENV_PY = _VENV / "bin" / "python"
+# Re-exec into the venv unless we're already inside it. Compare sys.prefix
+# (the active environment) rather than the interpreter path: the venv's python
+# is a symlink back to the base interpreter, so resolving it would falsely
+# match the system python and skip the re-exec.
+if _VENV_PY.exists() and Path(sys.prefix).resolve() != _VENV.resolve():
     os.execv(str(_VENV_PY), [str(_VENV_PY), __file__, *sys.argv[1:]])
 
 sys.path.insert(0, str(ROOT))

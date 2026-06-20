@@ -1,49 +1,25 @@
 """Command-line entry point.
 
-Subcommand-based so new capabilities (transcribe, analyze) slot in cleanly:
-each subcommand registers itself with its own args and a handler.
+Subcommand-based so new capabilities slot in cleanly: each subcommand registers
+itself with its own args and a handler. Orchestration lives in ops.py, shared
+with the TUI.
 """
 
 from __future__ import annotations
 
 import argparse
-import shutil
 import sys
-from datetime import datetime, timezone
 from pathlib import Path
 
-from . import __version__, index
-from .download import download, is_url, probe_filename
+from . import __version__, ops
+from .download import is_url
 from .timeparse import parse_time
-from .video import FFmpegError, ToolNotFound, clip, probe_duration
-
-# Generated files land here by default; this folder is git-ignored.
-OUTPUT_DIR = Path(__file__).resolve().parents[1] / "outputs"
-RAW_DIR = OUTPUT_DIR / "raw"          # downloaded source footage, kept
-INDEX_PATH = OUTPUT_DIR / "index.csv"  # link -> input -> output log
+from .transcribe import DEFAULT_MODEL
+from .video import FFmpegError, ToolNotFound
 
 
-def _log_index(link: str, input_path: Path, output_path: Path) -> None:
-    index.append_row(
-        INDEX_PATH,
-        timestamp=datetime.now(timezone.utc).isoformat(timespec="seconds"),
-        link=link,
-        video_id=index.id_from_name(input_path.name),
-        input_path=str(input_path),
-        output_path=str(output_path),
-    )
-
-
-def _add_clip_parser(subparsers: argparse._SubParsersAction) -> None:
-    p = subparsers.add_parser(
-        "clip",
-        help="clip or download a video from a local file or URL",
-        description=(
-            "Cut a clip from a video. With no --start/--duration, a URL is "
-            "simply downloaded in full."
-        ),
-    )
-    p.add_argument("input", help="local video path or a URL (http/https)")
+def _add_time_args(p: argparse.ArgumentParser, *, with_duration: bool = True) -> None:
+    """Add the shared -s/-d/-e time selection arguments."""
     p.add_argument(
         "-s", "--start", default=None,
         help="start time: seconds, M:SS, or H:MM:SS (default: 0)",
@@ -51,14 +27,42 @@ def _add_clip_parser(subparsers: argparse._SubParsersAction) -> None:
     span = p.add_mutually_exclusive_group()
     span.add_argument(
         "-d", "--duration", default=None,
-        help="clip length: seconds, M:SS, or H:MM:SS. Omit with --start to clip "
-             "to the end; omit everything to just download a URL.",
+        help="clip length: seconds, M:SS, or H:MM:SS.",
     )
     span.add_argument(
         "-e", "--end", default=None,
-        help="end time: seconds, M:SS, or H:MM:SS. Clip runs from --start to "
-             "here (mutually exclusive with --duration).",
+        help="end time: seconds, M:SS, or H:MM:SS (mutually exclusive with "
+             "--duration).",
     )
+
+
+def _resolve_span(args: argparse.Namespace) -> tuple[float, float | None]:
+    """Turn parsed -s/-d/-e into (start, duration). Raises ValueError."""
+    start = parse_time(args.start) if args.start is not None else 0.0
+    duration = parse_time(args.duration) if args.duration is not None else None
+    end = parse_time(args.end) if args.end is not None else None
+    if duration is not None and duration <= 0:
+        raise ValueError("--duration must be greater than 0")
+    if end is not None:
+        if end <= start:
+            raise ValueError(f"--end ({end:g}s) must be after --start ({start:g}s)")
+        duration = end - start
+    return start, duration
+
+
+# --- clip ------------------------------------------------------------------
+
+def _add_clip_parser(subparsers: argparse._SubParsersAction) -> None:
+    p = subparsers.add_parser(
+        "clip",
+        help="clip or download a video from a local file or URL",
+        description=(
+            "Cut a clip from a video. With no --start/--duration/--end, a URL "
+            "is simply downloaded in full."
+        ),
+    )
+    p.add_argument("input", help="local video path or a URL (http/https)")
+    _add_time_args(p)
     p.add_argument(
         "-o", "--output", default=None,
         help="output file (default: a name in the outputs/ folder)",
@@ -68,135 +72,53 @@ def _add_clip_parser(subparsers: argparse._SubParsersAction) -> None:
         help="stream-copy instead of re-encoding (instant, but start snaps to "
              "nearest keyframe)",
     )
-    p.add_argument(
-        "--overwrite", action="store_true",
-        help="overwrite the output file if it exists",
-    )
-    p.add_argument(
-        "--force-download", action="store_true",
-        help="re-download from a URL even if the footage is already cached",
-    )
+    p.add_argument("--overwrite", action="store_true",
+                   help="overwrite the output file if it exists")
+    p.add_argument("--force-download", action="store_true",
+                   help="re-download from a URL even if the footage is cached")
     p.add_argument("-q", "--quiet", action="store_true", help="less output")
     p.set_defaults(func=_cmd_clip)
 
 
-def _clip_output(source_name: str) -> Path:
-    stem = Path(source_name).stem or "video"
-    return OUTPUT_DIR / f"{stem}_clip.mp4"
-
-
-def _get_footage(link: str, *, force: bool, quiet: bool) -> Path:
-    """Return raw footage for a URL, reusing a cached copy unless `force`.
-
-    Dedup is by video ID: an exact-URL hit is the fast path (no network); a
-    different URL for the same video is caught via a metadata-only id probe.
-    """
-    if not force:
-        cached = index.find_raw_for_link(INDEX_PATH, link)
-        if cached is None:
-            predicted = probe_filename(link, RAW_DIR, quiet=quiet)
-            video_id = index.id_from_name(predicted)
-            cached = index.find_raw_by_id(INDEX_PATH, RAW_DIR, video_id)
-        if cached is not None:
-            if not quiet:
-                print(f"Reusing cached footage: {cached}", file=sys.stderr)
-            return cached
-    if not quiet:
-        print(f"Downloading {link} ...", file=sys.stderr)
-    return download(link, RAW_DIR, quiet=quiet)
-
-
 def _cmd_clip(args: argparse.Namespace) -> int:
     try:
-        start = parse_time(args.start) if args.start is not None else 0.0
-        duration = parse_time(args.duration) if args.duration is not None else None
-        end = parse_time(args.end) if args.end is not None else None
+        start, duration = _resolve_span(args)
     except ValueError as e:
         print(f"error: {e}", file=sys.stderr)
         return 2
 
-    if duration is not None and duration <= 0:
-        print("error: --duration must be greater than 0", file=sys.stderr)
-        return 2
-
-    # An end time is just a friendlier way to express a duration.
-    if end is not None:
-        if end <= start:
-            print(
-                f"error: --end ({end:g}s) must be after --start ({start:g}s)",
-                file=sys.stderr,
-            )
-            return 2
-        duration = end - start
-
-    # No start, duration, or end => download-only mode (URLs only).
-    download_only = args.start is None and args.duration is None and args.end is None
+    download_mode = args.start is None and args.duration is None and args.end is None
     is_url_input = is_url(args.input)
     link = args.input if is_url_input else ""
     output = Path(args.output).expanduser() if args.output else None
+    quiet = args.quiet
 
     try:
-        # Download-only: the raw footage IS the deliverable; keep it in raw/.
-        if download_only:
+        if download_mode:
             if not is_url_input:
                 print(
                     "error: nothing to do — the input is already a local file. "
-                    "Add --duration (and optionally --start) to make a clip.",
+                    "Add --duration/--end (and optionally --start) to make a clip.",
                     file=sys.stderr,
                 )
                 return 1
-            source = _get_footage(link, force=args.force_download, quiet=args.quiet)
-            if output is not None and output != source:
-                output.parent.mkdir(parents=True, exist_ok=True)
-                shutil.move(str(source), str(output))
-                source = output
-            _log_index(link, source, source)
-            print(source)
+            result = ops.download_only(
+                link, output=output, force=args.force_download, quiet=quiet,
+            )
+            print(result)
             return 0
 
-        # Clip mode. Resolve the source: download (and keep) if it's a URL.
-        if is_url_input:
-            source = _get_footage(link, force=args.force_download, quiet=args.quiet)
-            output_basis = source.name
-        else:
-            source = Path(args.input).expanduser()
-            if not source.exists():
-                print(f"error: input not found: {source}", file=sys.stderr)
-                return 1
-            output_basis = source.name
-
+        source = _resolve_source(args.input, is_url_input, args.force_download, quiet)
+        if source is None:
+            return 1
         if output is None:
-            output = _clip_output(output_basis)
-
-        # Validate against the source duration when we can read it.
-        total = probe_duration(source)
-        if total is not None:
-            if start >= total:
-                print(
-                    f"error: start ({start:g}s) is at or past the video length "
-                    f"({total:g}s)",
-                    file=sys.stderr,
-                )
-                return 1
-            if duration is not None and start + duration > total + 0.5:
-                avail = total - start
-                print(
-                    f"warning: requested {duration:g}s but only {avail:g}s remain "
-                    f"after the start; clip will be truncated.",
-                    file=sys.stderr,
-                )
-
-        if not args.quiet:
-            span = f"{duration:g}s" if duration is not None else "to end"
-            print(f"Clipping {span} from {start:g}s -> {output}", file=sys.stderr)
-        clip(
+            output = ops.clip_output_path(source.name)
+        ops.clip_video(
             source, output, start, duration,
-            copy=args.copy, overwrite=args.overwrite, quiet=args.quiet,
+            link=link, copy=args.copy, overwrite=args.overwrite, quiet=quiet,
         )
-        _log_index(link, source, output)
         print(output)
         return 0
-
     except ToolNotFound as e:
         print(f"error: {e}", file=sys.stderr)
         return 127
@@ -206,6 +128,109 @@ def _cmd_clip(args: argparse.Namespace) -> int:
     except (FFmpegError, RuntimeError, ValueError) as e:
         print(f"error: {e}", file=sys.stderr)
         return 1
+
+
+# --- transcribe ------------------------------------------------------------
+
+def _add_transcribe_parser(subparsers: argparse._SubParsersAction) -> None:
+    p = subparsers.add_parser(
+        "transcribe",
+        help="transcribe a video/clip to text (local, via whisper.cpp)",
+        description=(
+            "Transcribe a local file or URL to a readable .txt. With "
+            "--start/--duration/--end, only that span is transcribed."
+        ),
+    )
+    p.add_argument("input", help="local video path or a URL (http/https)")
+    _add_time_args(p)
+    p.add_argument(
+        "-o", "--output", default=None,
+        help="output .txt (default: a name in the outputs/ folder)",
+    )
+    p.add_argument("--model", default=DEFAULT_MODEL,
+                   help=f"whisper model name (default: {DEFAULT_MODEL})")
+    p.add_argument("--srt", action="store_true",
+                   help="also write a timestamped .srt alongside the .txt")
+    p.add_argument("--force-download", action="store_true",
+                   help="re-download from a URL even if the footage is cached")
+    p.add_argument("-q", "--quiet", action="store_true", help="less output")
+    p.set_defaults(func=_cmd_transcribe)
+
+
+def _cmd_transcribe(args: argparse.Namespace) -> int:
+    try:
+        start, duration = _resolve_span(args)
+    except ValueError as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 2
+
+    is_url_input = is_url(args.input)
+    link = args.input if is_url_input else ""
+    quiet = args.quiet
+
+    try:
+        source = _resolve_source(args.input, is_url_input, args.force_download, quiet)
+        if source is None:
+            return 1
+        output = (
+            Path(args.output).expanduser() if args.output
+            else ops.transcript_output_path(source.name)
+        )
+        result = ops.transcribe_source(
+            source, output, start=start, duration=duration, link=link,
+            model=args.model, srt=args.srt, quiet=quiet,
+        )
+        print(result)
+        return 0
+    except ToolNotFound as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 127
+    except (FFmpegError, RuntimeError, ValueError) as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 1
+
+
+# --- tui -------------------------------------------------------------------
+
+def _add_tui_parser(subparsers: argparse._SubParsersAction) -> None:
+    p = subparsers.add_parser(
+        "tui",
+        help="launch the interactive terminal UI",
+        description="An interactive front-end over download/clip/transcribe.",
+    )
+    p.set_defaults(func=_cmd_tui)
+
+
+def _cmd_tui(args: argparse.Namespace) -> int:
+    try:
+        from .tui import run as run_tui
+    except ModuleNotFoundError as e:
+        print(
+            f"error: the TUI needs Textual ({e.name}). Install it with:\n"
+            f"  ./.venv/bin/python -m pip install textual",
+            file=sys.stderr,
+        )
+        return 127
+    run_tui()
+    return 0
+
+
+# --- shared ----------------------------------------------------------------
+
+def _resolve_source(
+    raw_input: str, is_url_input: bool, force_download: bool, quiet: bool,
+) -> Path | None:
+    """Resolve the input to a local file, downloading a URL if needed.
+
+    Returns None (after printing an error) if a local path doesn't exist.
+    """
+    if is_url_input:
+        return ops.get_footage(raw_input, force=force_download, quiet=quiet)
+    source = Path(raw_input).expanduser()
+    if not source.exists():
+        print(f"error: input not found: {source}", file=sys.stderr)
+        return None
+    return source
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -218,7 +243,8 @@ def build_parser() -> argparse.ArgumentParser:
     )
     subparsers = parser.add_subparsers(dest="command", required=True)
     _add_clip_parser(subparsers)
-    # Future: _add_transcribe_parser(subparsers), _add_analyze_parser(subparsers)
+    _add_transcribe_parser(subparsers)
+    _add_tui_parser(subparsers)
     return parser
 
 

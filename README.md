@@ -1,14 +1,29 @@
 # clipper
 
-A small, extensible video toolkit. Today it clips videos to a length, from a
-local file or a URL. Built to grow — transcription and analysis are planned as
-additional subcommands.
+A small, extensible video toolkit. It **clips** videos to a length,
+**downloads** them from a URL, and **transcribes** them to text — from the
+command line or an interactive **TUI**. Source can be a local file or a URL.
 
 ## Requirements
 
 - Python 3.10+
 - `ffmpeg` + `ffprobe` — `brew install ffmpeg`
 - `yt-dlp` (only for URLs) — `brew install yt-dlp`
+- `whisper-cpp` (only for `transcribe`) — `brew install whisper-cpp`
+- `textual` (only for the TUI) — installed into a project venv (see Setup)
+
+### Setup (for the TUI)
+
+The TUI needs Textual, which installs into a project virtualenv so it never
+touches your system Python:
+
+```sh
+python3 -m venv .venv
+./.venv/bin/python -m pip install textual
+```
+
+The `./clip` wrapper auto-detects `.venv` and uses it. The `clip`, `download`,
+and `transcribe` commands work without it.
 
 ## Usage
 
@@ -88,18 +103,67 @@ By default clips are **re-encoded** (libx264/aac) so the cut is frame-accurate.
 Use `--copy` when you want an instant cut and don't mind the start landing on a
 keyframe.
 
+## Transcribe
+
+Turn a video (or just a span of it) into readable text, fully **locally** via
+whisper.cpp — no network, no API keys.
+
+```sh
+./clip transcribe <input> [--start <time>] [--duration <length> | --end <time>] [--srt]
+```
+
+The same `-s/-d/-e` time flags as `clip` apply, so you can transcribe **only a
+clip's span** without cutting it first. Output is a readable `.txt` in
+`outputs/`; add `--srt` for a timestamped subtitle file alongside it.
+
+```sh
+# Whole file
+./clip transcribe talk.mp4
+
+# Just 1:30–1:45, with subtitles
+./clip transcribe talk.mp4 -s 1:30 -e 1:45 --srt
+
+# Straight from a URL (footage is cached/deduped like clip)
+./clip transcribe "https://www.youtube.com/watch?v=..."
+```
+
+| Flag | Meaning |
+|------|---------|
+| `-s/-d/-e` | Same time selection as `clip` (transcribe only that span) |
+| `--model` | whisper model name (default `base.en`) |
+| `--srt` | Also write a timestamped `.srt` |
+| `-o, --output` | Output `.txt` path |
+
+Models live in `outputs/models/` as `ggml-<name>.bin`. `base.en` (~140MB) is
+downloaded during setup; grab others from
+[Hugging Face](https://huggingface.co/ggerganov/whisper.cpp/tree/main).
+
+## Interactive TUI
+
+```sh
+./clip tui
+```
+
+A terminal front-end over everything above: enter a source, set start/end or
+duration, and hit **Download**, **Clip**, or **Transcribe**. Progress streams
+into a log pane, and a library table shows past outputs from `index.csv` —
+select a row to reload its source. Runs the exact same code as the CLI.
+
 ## Project layout
 
 ```
-clip                 # executable wrapper
+clip                 # executable wrapper (re-execs into .venv if present)
 clipper/
   cli.py             # argparse + subcommand dispatch
+  ops.py             # shared orchestration (CLI + TUI call into here)
+  tui.py             # Textual interactive UI
   video.py           # ffmpeg/ffprobe: probe + clip
   download.py        # yt-dlp URL handling
+  transcribe.py      # whisper.cpp transcription
   timeparse.py       # time parsing/formatting
   index.py           # outputs/index.csv logging
-outputs/             # generated media + index.csv (git-ignored)
+outputs/             # generated media, models, index.csv (git-ignored)
 ```
 
-To add a feature later (e.g. `transcribe`), add a module plus an
-`_add_<name>_parser` registration in `cli.py`.
+To add a subcommand, put its orchestration in `ops.py` and register an
+`_add_<name>_parser` in `cli.py` so the CLI and TUI share one code path.
